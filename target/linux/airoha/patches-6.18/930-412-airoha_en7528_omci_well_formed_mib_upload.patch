@@ -1,0 +1,403 @@
+Subject: [PATCH] net: xpon: omci: upload a well-formed MIB
+
+A baseline MIB upload next response carries an attribute mask and 26
+octets of attribute values (ITU-T G.988 A.2.2). The agent sent every
+managed entity in exactly one response:
+
+- ONU-G, ONU2-G and ANI-G, which have no descriptor, went out with the
+  stored mask 0xffff and the first 26 octets of their data. The mask
+  named attributes the class does not have, and promised far more data
+  than followed.
+- Every other entity was cut at the first attribute that did not fit, so
+  most of Circuit pack, ONU2-G and VEIP was never reported.
+
+Report an entity in as many consecutive responses as its attributes
+take, each naming exactly the attributes it carries, and size the MIB
+upload response accordingly.
+
+ANI-G was also seeded as all zeroes: no T-CONTs, a zero GEM block length
+and no status reporting. Seed it from the ANI topology with the G.988
+defaults, and answer a Get by attribute rather than with the raw object.
+
+ONU2-G stored its connectivity capability and priority queue scale
+factor where the Get layout did not look; point the layout at them.
+
+Finally state the Nokia VEIP seeding precondition where it is used. The
+function is only reached for the nokia-alcl profile, so this changes no
+behaviour.
+---
+--- a/net/xpon/omci/agent.c
++++ b/net/xpon/omci/agent.c
+@@ -230,10 +230,49 @@ static const struct omci_get_attr_layout
+ 	{ BIT(8), 28, 1 },		/* Deprecated */
+ 	{ BIT(7), 29, 2 },		/* Total GEM port IDs */
+ 	{ BIT(6), OMCI_ATTR_VALUE_ZERO, 4 },	/* System uptime */
+-	{ BIT(5), OMCI_ATTR_VALUE_ZERO, 2 },	/* Connectivity capability */
+-	{ BIT(4), 31, 1 },		/* Connectivity mode */
+-	{ BIT(3), OMCI_ATTR_VALUE_ZERO, 2 },	/* QoS configuration */
+-	{ BIT(2), OMCI_ATTR_VALUE_ZERO, 2 },	/* Priority queue scale */
++	{ BIT(5), 35, 2 },		/* Connectivity capability */
++	{ BIT(4), 37, 1 },		/* Connectivity mode */
++	{ BIT(3), 38, 2 },		/* QoS configuration */
++	{ BIT(2), 40, 2 },		/* Priority queue scale */
++};
++
++/* ITU-T G.988 9.2.1: sixteen attributes, 22 octets in all. */
++#define OMCI_ANI_G_ATTR_MASK		GENMASK(15, 0)
++#define OMCI_ANI_G_GEM_BLOCK_LENGTH	48
++#define OMCI_ANI_G_SF_THRESHOLD		5
++#define OMCI_ANI_G_SD_THRESHOLD		9
++#define OMCI_ANI_G_RESPONSE_TIME_NS	35000
++#define OMCI_ANI_G_RX_THRESHOLD_DEFAULT	0xff
++#define OMCI_ANI_G_TX_THRESHOLD_DEFAULT	0x81
++
++static const struct omci_get_attr_layout omci_ani_g_attr_layout[] = {
++	{ BIT(15), 0, 1 },		/* SR indication */
++	{ BIT(14), 1, 2 },		/* Total T-CONT number */
++	{ BIT(13), 3, 2 },		/* GEM block length */
++	{ BIT(12), 5, 1 },		/* Piggyback DBA reporting */
++	{ BIT(11), 6, 1 },		/* Deprecated */
++	{ BIT(10), 7, 1 },		/* SF threshold */
++	{ BIT(9), 8, 1 },		/* SD threshold */
++	{ BIT(8), 9, 1 },		/* ARC */
++	{ BIT(7), 10, 1 },		/* ARC interval */
++	{ BIT(6), 11, 2 },		/* Optical signal level */
++	{ BIT(5), 13, 1 },		/* Lower optical threshold */
++	{ BIT(4), 14, 1 },		/* Upper optical threshold */
++	{ BIT(3), 15, 2 },		/* ONU response time */
++	{ BIT(2), 17, 2 },		/* Transmit optical level */
++	{ BIT(1), 19, 1 },		/* Lower transmit power threshold */
++	{ BIT(0), 20, 1 },		/* Upper transmit power threshold */
++};
++
++static const struct omci_get_attr_layout omci_onu_data_attr_layout[] = {
++	{ BIT(15), 0, 1 },		/* MIB data sync */
++};
++
++static const struct omci_get_attr_layout omci_olt_g_attr_layout[] = {
++	{ OMCI_OLT_G_VENDOR_ID_MASK, 0, 4 },
++	{ OMCI_OLT_G_EQUIPMENT_ID_MASK, 4, 20 },
++	{ OMCI_OLT_G_VERSION_MASK, 24, 14 },
++	{ OMCI_OLT_G_TIME_OF_DAY_MASK, 38, OMCI_OLT_G_TIME_OF_DAY_LEN },
+ };
+ 
+ static const u8 *omci_olt_g_consume(const u8 **data, size_t *len,
+@@ -1115,7 +1154,8 @@ omci_agent_seed_nokia_locked(struct omci
+ 	 * along with GEM ports 256 and 257 via PLOAM without OMCI Create messages.
+ 	 * Seed the standard VEIP datapath bridge for both GEM 256 and GEM 257.
+ 	 */
+-	if (agent->config.onu_type == 2) {
++	if (profile == OMCI_OLT_PROFILE_NOKIA_ALCL &&
++	    agent->config.onu_type == OMCI_ONU_TYPE_HGU) {
+ 		/* T-CONT 0x8000 -> Alloc-ID 256 */
+ 		memset(data, 0, sizeof(data));
+ 		put_unaligned_be16(256, data);
+@@ -1727,6 +1767,28 @@ static void omci_uni_g_default_data(u8 d
+ 	data[3] = 2;
+ }
+ 
++/*
++ * ITU-T G.988 9.2.1. An OLT sizes its upstream provisioning from these: an
++ * ANI-G reporting no T-CONTs and a zero GEM block length describes an ONU
++ * that cannot be given an Alloc-ID at all.
++ */
++static void omci_ani_g_default_data(const struct omci_ani_topology *topology,
++				    u8 data[OMCI_MAX_ATTR_DATA])
++{
++	memset(data, 0, OMCI_MAX_ATTR_DATA);
++	data[0] = 1;	/* Status reporting is supported. */
++	put_unaligned_be16(topology->tcont_count, data + 1);
++	put_unaligned_be16(OMCI_ANI_G_GEM_BLOCK_LENGTH, data + 3);
++	data[5] = 1;	/* Piggyback DBA reporting modes 0 and 1. */
++	data[7] = OMCI_ANI_G_SF_THRESHOLD;
++	data[8] = OMCI_ANI_G_SD_THRESHOLD;
++	data[13] = OMCI_ANI_G_RX_THRESHOLD_DEFAULT;
++	data[14] = OMCI_ANI_G_RX_THRESHOLD_DEFAULT;
++	put_unaligned_be16(OMCI_ANI_G_RESPONSE_TIME_NS, data + 15);
++	data[19] = OMCI_ANI_G_TX_THRESHOLD_DEFAULT;
++	data[20] = OMCI_ANI_G_TX_THRESHOLD_DEFAULT;
++}
++
+ static int omci_agent_populate_defaults(struct omci_device *odev)
+ {
+ 	struct omci_agent *agent = &odev->agent;
+@@ -1783,10 +1845,11 @@ static int omci_agent_populate_defaults(
+ 				   sizeof(data));
+ 	if (ret)
+ 		return ret;
+-	memset(data, 0, sizeof(data));
+-	ret = omci_mib_add_default(agent, OMCI_CLASS_ANI_G,
+-				   OMCI_ANI_G_ENTITY_ID, data,
+-				   sizeof(data));
++	omci_ani_g_default_data(&topology, data);
++	ret = omci_mib_add_default_mask(agent, OMCI_CLASS_ANI_G,
++					OMCI_ANI_G_ENTITY_ID,
++					OMCI_ANI_G_ATTR_MASK, data,
++					sizeof(data));
+ 	if (ret)
+ 		return ret;
+ 
+@@ -2571,6 +2634,169 @@ static bool omci_mib_object_uploadable(c
+ 	return !desc || !(desc->flags & OMCI_ME_F_NO_MIB_UPLOAD);
+ }
+ 
++#define OMCI_UPLOAD_ATTR_SPACE	26
++
++struct omci_upload_attr {
++	u16 mask;
++	u8 offset;
++	u8 len;
++};
++
++static unsigned int
++omci_upload_copy_layout(const struct omci_get_attr_layout *layout,
++			size_t count, struct omci_upload_attr *attrs)
++{
++	size_t i;
++
++	for (i = 0; i < count; i++) {
++		attrs[i].mask = layout[i].mask;
++		attrs[i].offset = layout[i].offset;
++		attrs[i].len = layout[i].len;
++	}
++
++	return count;
++}
++
++/*
++ * List the attributes of @object a MIB upload reports, in attribute order.
++ * Returns a negative value for a class the agent holds no layout for.
++ */
++static int omci_upload_attrs(const struct omci_agent *agent,
++			     const struct omci_mib_object *object,
++			     struct omci_upload_attr attrs[16])
++{
++	const struct omci_me_desc *desc;
++	unsigned int count = 0;
++	unsigned int bit;
++	size_t i;
++
++	switch (object->class_id) {
++	case OMCI_CLASS_ONU_DATA:
++		return omci_upload_copy_layout(omci_onu_data_attr_layout,
++				ARRAY_SIZE(omci_onu_data_attr_layout), attrs);
++	case OMCI_CLASS_OLT_G:
++		return omci_upload_copy_layout(omci_olt_g_attr_layout,
++				ARRAY_SIZE(omci_olt_g_attr_layout), attrs);
++	case OMCI_CLASS_ONU_G:
++		return omci_upload_copy_layout(omci_onu_g_attr_layout,
++				ARRAY_SIZE(omci_onu_g_attr_layout), attrs);
++	case OMCI_CLASS_ONU2_G:
++		return omci_upload_copy_layout(omci_onu2_g_attr_layout,
++				ARRAY_SIZE(omci_onu2_g_attr_layout), attrs);
++	case OMCI_CLASS_ANI_G:
++		return omci_upload_copy_layout(omci_ani_g_attr_layout,
++				ARRAY_SIZE(omci_ani_g_attr_layout), attrs);
++	case OMCI_CLASS_PRIORITY_QUEUE:
++		for (i = 0; i < ARRAY_SIZE(omci_priority_queue_layout); i++) {
++			attrs[i].mask = omci_priority_queue_layout[i].mask;
++			attrs[i].offset = omci_priority_queue_layout[i].offset;
++			attrs[i].len = omci_priority_queue_layout[i].length;
++		}
++		return i;
++	case OMCI_CLASS_TRAFFIC_SCHEDULER:
++		for (i = 0; i < ARRAY_SIZE(omci_traffic_scheduler_layout); i++) {
++			attrs[i].mask = omci_traffic_scheduler_layout[i].mask;
++			attrs[i].offset = omci_traffic_scheduler_layout[i].offset;
++			attrs[i].len = omci_traffic_scheduler_layout[i].length;
++		}
++		return i;
++	default:
++		break;
++	}
++
++	desc = omci_me_lookup(agent, object->class_id);
++	if (!desc)
++		return -ENOENT;
++
++	for (bit = 0; bit < 16; bit++) {
++		u16 mask = BIT(15 - bit);
++
++		if (!(desc->mib_upload_mask & desc->valid_attr_mask & mask))
++			continue;
++		for (i = 0; i < desc->num_attrs; i++) {
++			const struct omci_attr_desc *attr = &desc->attrs[i];
++
++			if (attr->mask != mask ||
++			    !(attr->access & OMCI_ATTR_ACCESS_READ))
++				continue;
++			attrs[count].mask = mask;
++			attrs[count].offset = attr->offset;
++			attrs[count].len = attr->len;
++			count++;
++			break;
++		}
++	}
++
++	return count;
++}
++
++/*
++ * ITU-T G.988 A.2.2: a baseline MIB upload next response carries 26 octets
++ * of attribute values and an attribute mask naming exactly the attributes
++ * present. A managed entity whose attributes do not fit is reported in as
++ * many consecutive responses as it takes; an attribute too large for one
++ * response (a table) is not uploaded at all.
++ *
++ * Walk the segments of @object. When @content is set, encode segment
++ * @segment into it. Returns the number of segments the object occupies.
++ */
++static unsigned int omci_upload_segments(const struct omci_agent *agent,
++					 const struct omci_mib_object *object,
++					 unsigned int segment, u8 *content)
++{
++	struct omci_upload_attr attrs[16];
++	unsigned int current_segment = 0;
++	size_t used = 0;
++	u16 mask = 0;
++	bool open = false;
++	int count, i;
++
++	count = omci_upload_attrs(agent, object, attrs);
++	if (count < 0) {
++		/* Unknown layout: report the leading octets as stored. */
++		if (content && !segment) {
++			size_t len = min_t(size_t, object->data_len ?:
++					   OMCI_UPLOAD_ATTR_SPACE,
++					   OMCI_UPLOAD_ATTR_SPACE);
++
++			put_unaligned_be16(object->attr_mask, content + 4);
++			memcpy(content + 6, object->data, len);
++		}
++		return 1;
++	}
++
++	for (i = 0; i < count; i++) {
++		const struct omci_upload_attr *attr = &attrs[i];
++
++		if (!(object->attr_mask & attr->mask) || !attr->len ||
++		    attr->len > OMCI_UPLOAD_ATTR_SPACE)
++			continue;
++		if (attr->offset != OMCI_ATTR_VALUE_ZERO &&
++		    attr->offset + attr->len > sizeof(object->data))
++			continue;
++		if (open && used + attr->len > OMCI_UPLOAD_ATTR_SPACE) {
++			if (content && current_segment == segment)
++				put_unaligned_be16(mask, content + 4);
++			current_segment++;
++			used = 0;
++			mask = 0;
++		}
++		if (content && current_segment == segment &&
++		    attr->offset != OMCI_ATTR_VALUE_ZERO)
++			memcpy(content + 6 + used, object->data + attr->offset,
++			       attr->len);
++		used += attr->len;
++		mask |= attr->mask;
++		open = true;
++	}
++
++	/* An entity with nothing to report still announces its instance. */
++	if (content && current_segment == segment)
++		put_unaligned_be16(mask, content + 4);
++
++	return current_segment + 1;
++}
++
+ static unsigned int omci_mib_count_locked(struct omci_agent *agent)
+ {
+ 	struct omci_mib_object *object;
+@@ -2583,6 +2809,20 @@ static unsigned int omci_mib_count_locke
+ 	return count;
+ }
+ 
++/* Number of MIB upload next commands the current MIB takes. */
++static unsigned int omci_mib_upload_count_locked(struct omci_agent *agent)
++{
++	struct omci_mib_object *object;
++	unsigned long index;
++	unsigned int count = 0;
++
++	xa_for_each(&agent->mib, index, object)
++		if (omci_mib_object_uploadable(agent, object))
++			count += omci_upload_segments(agent, object, 0, NULL);
++
++	return min_t(unsigned int, count, U16_MAX);
++}
++
+ static void omci_agent_reset_olt_objects_locked(struct omci_agent *agent)
+ {
+ 	struct omci_mib_object *object;
+@@ -3814,6 +4054,11 @@ static u8 omci_agent_get_locked(struct o
+ 			object, omci_onu2_g_attr_layout,
+ 			ARRAY_SIZE(omci_onu2_g_attr_layout), OMCI_ONU2_G_ATTR_MASK,
+ 			mask, response_content, response_capacity, response_len);
++	case OMCI_CLASS_ANI_G:
++		return omci_agent_get_masked_object(
++			object, omci_ani_g_attr_layout,
++			ARRAY_SIZE(omci_ani_g_attr_layout), OMCI_ANI_G_ATTR_MASK,
++			mask, response_content, response_capacity, response_len);
+ 	default:
+ 		break;
+ 	}
+@@ -4019,43 +4264,28 @@ omci_agent_send_ani_g_test_result(struct
+ static int omci_agent_upload_next_locked(struct omci_agent *agent,
+ 					 u16 sequence, u8 *content)
+ {
+-	const struct omci_me_desc *desc;
+ 	struct omci_mib_object *object;
++	unsigned int position = 0;
+ 	unsigned long index;
+-	size_t encoded_len = 0;
+-	u16 encoded_mask = 0;
+-	u16 upload_pos = 0;
+-	int ret;
+ 
+ 	xa_for_each(&agent->mib, index, object) {
++		unsigned int segments;
++
+ 		if (!omci_mib_object_uploadable(agent, object))
+ 			continue;
+-		if (upload_pos++ == sequence)
++		segments = omci_upload_segments(agent, object, 0, NULL);
++		if (sequence < position + segments)
+ 			goto found;
++		position += segments;
+ 	}
+ 
+ 	return -ENOENT;
+ 
+ found:
++	memset(content, 0, 6 + OMCI_UPLOAD_ATTR_SPACE);
+ 	put_unaligned_be16(object->class_id, content);
+ 	put_unaligned_be16(object->entity_id, content + 2);
+-	desc = omci_me_lookup(agent, object->class_id);
+-	if (desc) {
+-		u16 mask = object->attr_mask & desc->mib_upload_mask;
+-
+-		ret = omci_me_encode_attributes(desc, object, mask,
+-						content + 6, 26,
+-						&encoded_mask, &encoded_len);
+-		if (ret && mask)
+-			return ret;
+-	} else {
+-		encoded_mask = object->attr_mask;
+-		encoded_len = min_t(size_t, object->data_len ?: 26, 26);
+-		memcpy(content + 6, object->data, encoded_len);
+-	}
+-	put_unaligned_be16(encoded_mask, content + 4);
+-	if (encoded_len < 26)
+-		memset(content + 6 + encoded_len, 0, 26 - encoded_len);
++	omci_upload_segments(agent, object, sequence - position, content);
+ 	agent->upload_index = sequence + 1;
+ 	return 0;
+ }
+@@ -4223,7 +4453,7 @@ omci_agent_build_response_locked(struct
+ 		if (capacity < 2)
+ 			return -EMSGSIZE;
+ 		agent->upload_index = 0;
+-		put_unaligned_be16(omci_mib_count_locked(agent), content);
++		put_unaligned_be16(omci_mib_upload_count_locked(agent), content);
+ 		*content_len = 2;
+ 		break;
+ 	case OMCI_MSG_TYPE_MIB_UPLOAD_NEXT:

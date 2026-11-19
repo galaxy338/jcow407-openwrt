@@ -1,0 +1,26 @@
+--- a/net/xpon/omci/agent.c
++++ b/net/xpon/omci/agent.c
+@@ -1882,15 +1882,15 @@ int omci_agent_init(struct omci_device *
+ 	agent->config.onu_type_source = OMCI_CONFIG_SOURCE_DEFAULT;
+-	agent->config.traffic_mgmt_option = 0;
++	agent->config.traffic_mgmt_option = 2;
+ 	agent->config.olt_profile = OMCI_OLT_PROFILE_AUTO;
+ 	agent->config.olt_profile_force = OMCI_OLT_PROFILE_UNSPEC;
+ 	agent->config.olt_profile_source = OMCI_CONFIG_SOURCE_DEFAULT;
+ 	agent->config.olt_profile_force_source = OMCI_CONFIG_SOURCE_DEFAULT;
+-	memcpy(agent->config.serial_number, "OPEN0001", 8);
+-	memcpy(agent->config.vendor_id, "OPEN", 4);
+-	strscpy(agent->config.version, "OpenWrt", sizeof(agent->config.version));
+-	strscpy(agent->config.software_version[0], "OpenWrt",
++	memcpy(agent->config.serial_number, "SCOM1F821896", 8);
++	memcpy(agent->config.vendor_id, "SCOM", 4);
++	strscpy(agent->config.version, "RP0201", sizeof(agent->config.version));
++	strscpy(agent->config.software_version[0], "JCOW414_R2.59.1",
+ 		sizeof(agent->config.software_version[0]));
+-	strscpy(agent->config.software_version[1], "OpenWrt",
++	strscpy(agent->config.software_version[1], "JCOW414_R2.59",
+ 		sizeof(agent->config.software_version[1]));
+ 	agent->config.omcc_version = OMCI_OMCC_VERSION_G988_2010_BASELINE;
+-	strscpy(agent->config.equipment_id, "Airoha EN7523",
++	strscpy(agent->config.equipment_id, "ECONET",
+ 		sizeof(agent->config.equipment_id));

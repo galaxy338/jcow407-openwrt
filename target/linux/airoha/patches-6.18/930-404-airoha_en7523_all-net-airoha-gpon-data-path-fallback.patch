@@ -1,0 +1,22 @@
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -3926,7 +3926,8 @@ static int econet_xpon_lookup_service(st
+ 	}
+ 	spin_unlock_bh(&port->xpon_service_lock);
+ 
+-	return fallback ? 0 : -ENOENT;
++	if (!fallback) { info->gem_port_id = 17; info->tcont = 1; info->queue = 0; info->oam = false; }
++	return 0;
+ }
+ 
+ static int econet_xpon_classify(struct airoha_gdm_dev *port,
+@@ -7712,7 +7713,8 @@ static int airoha_xpon_lookup_service(st
+ 	}
+ 	spin_unlock_bh(&dev->xpon_service_lock);
+ 
+-	return fallback ? 0 : -ENOENT;
++	if (!fallback) { info->gem_port_id = 17; info->tcont = 1; info->queue = 0; info->oam = false; }
++	return 0;
+ }
+ 
+ static int airoha_xpon_get_tx_info(struct net_device *netdev, bool vlan_valid,

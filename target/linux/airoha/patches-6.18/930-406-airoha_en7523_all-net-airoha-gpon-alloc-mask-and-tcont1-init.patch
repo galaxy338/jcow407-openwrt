@@ -1,0 +1,112 @@
+--- a/drivers/net/ethernet/airoha/airoha_xpon.h
++++ b/drivers/net/ethernet/airoha/airoha_xpon.h
+@@ -239,7 +239,7 @@
+ #define PLOAMd_FIFO_USED_MASK	0xFF
+ 
+ /* G_TCONT_ID pair register */
+-#define TCONT_ID_MASK		0x0FFF
++#define TCONT_ID_MASK		0x3FFF
+ #define TCONT0_VALID		BIT(15)
+ #define TCONT1_ID_SHIFT		16
+ #define TCONT1_VALID		BIT(31)
+@@ -249,7 +249,7 @@
+ #define TCONT16_CMD_EXEC	BIT(31)
+ #define TCONT16_VALID		BIT(27)
+ #define TCONT16_IDX_SHIFT	16
+-#define TCONT16_ALLOC_MASK	0x0FFF
++#define TCONT16_ALLOC_MASK	0x3FFF
+ 
+ /* G_TCONT_ID_16_31_STS */
+ #define TCONT16_CMD_DONE	BIT(31)
+diff -urN a/drivers/net/ethernet/airoha/airoha_eth.c b/drivers/net/ethernet/airoha/airoha_eth.c
+--- a/drivers/net/ethernet/airoha/airoha_eth.c	2026-11-16 06:12:45.887240370 +0530
++++ b/drivers/net/ethernet/airoha/airoha_eth.c	2026-11-16 06:12:45.888995242 +0530
+@@ -5523,6 +5523,8 @@
+ 		 */
+ 		airoha_fe_clear(dev->eth, REG_GDM_FWD_CFG(AIROHA_GDM2_IDX),
+ 				GDM_DROP_CRC_ERR_MASK);
++		airoha_fe_wr(dev->eth, REG_GDM_FWD_CFG(AIROHA_GDM2_IDX), 0x03f14444);
++		airoha_fe_wr(dev->eth, GDM_BASE(AIROHA_GDM2_IDX) + 0x2c, 0x44444444);
+ 		airoha_eth_update_gpon_pse_buf(dev, 1);
+ 	}
+ 
+diff -urN a/drivers/net/ethernet/airoha/airoha_ploam.c b/drivers/net/ethernet/airoha/airoha_ploam.c
+--- a/drivers/net/ethernet/airoha/airoha_ploam.c	2026-11-16 06:12:45.887550840 +0530
++++ b/drivers/net/ethernet/airoha/airoha_ploam.c	2026-11-16 06:12:45.889194911 +0530
+@@ -420,15 +420,17 @@
+ 	bool allocate;
+ 	u8 dm_bytes[9];
+ 
+-	if (onu_id != pp->onu_id)
+-		return;
+-	if (pp->state != GPON_O5_OPERATION)
+-		goto send_ack;
+-
+ 	/* c[0]=alloc_id_m, c[1] BE: bits[7:4]=alloc_id_l, [3:0]=resv */
+ 	alloc_id = ((u16)c[0] << 4) | ((c[1] >> 4) & 0xF);
+ 	/* c[2]=type: 0x01=allocate, 0xFF=deallocate */
+ 	allocate = (c[2] == 0x01);
++	pr_debug("airoha_ploam: received ASSIGN_ALLOC_ID: state=%d onu_id=%u (our=%u) alloc_id=%u allocate=%d\n",
++		pp->state, onu_id, pp->onu_id, alloc_id, allocate);
++
++	if (onu_id != pp->onu_id)
++		return;
++	if (pp->state != GPON_O5_OPERATION && pp->state != GPON_O4_RANGING)
++		goto send_ack;
+ 
+ 	if (alloc_id != pp->onu_id)
+ 		pp->ops->set_alloc_id(pp->hw_priv, alloc_id, allocate);
+diff -urN a/drivers/net/ethernet/airoha/airoha_xpon.c b/drivers/net/ethernet/airoha/airoha_xpon.c
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c	2026-11-16 06:12:45.887063915 +0530
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c	2026-11-16 06:12:45.888362200 +0530
+@@ -918,7 +918,7 @@
+ {
+ 	int index;
+ 
+-	for (index = 1; index < GPON_MAX_TCONT; index++)
++	for (index = 0; index < GPON_MAX_TCONT; index++)
+ 		if (priv->tcont_alloc_id[index] == alloc_id)
+ 			return index;
+ 
+@@ -929,7 +929,7 @@
+ {
+ 	int index;
+ 
+-	for (index = 1; index < GPON_MAX_TCONT; index++)
++	for (index = 0; index < GPON_MAX_TCONT; index++)
+ 		if (priv->tcont_entity_id[index] == entity_id)
+ 			return index;
+ 
+@@ -1734,6 +1734,32 @@
+ 		return ret;
+ 	}
+ 
++	priv->tcont_entity_id[0] = 0x8000;
++	__gpon_set_tcont_hw(priv, 1, 666, true);
++	priv->tcont_alloc_id[1] = 666;
++	priv->tcont_entity_id[1] = 0x8001;
++	airoha_eth_set_xpon_tcont_channel(priv->gdm_dev, 1, true);
++
++	__gpon_set_tcont_hw(priv, 2, 667, true);
++	priv->tcont_alloc_id[2] = 667;
++	priv->tcont_entity_id[2] = 0x8002;
++	airoha_eth_set_xpon_tcont_channel(priv->gdm_dev, 2, true);
++
++	__gpon_set_tcont_hw(priv, 3, 668, true);
++	priv->tcont_alloc_id[3] = 668;
++	priv->tcont_entity_id[3] = 0x8003;
++	airoha_eth_set_xpon_tcont_channel(priv->gdm_dev, 3, true);
++
++	__gpon_set_tcont_hw(priv, 4, 669, true);
++	priv->tcont_alloc_id[4] = 669;
++	priv->tcont_entity_id[4] = 0x8004;
++	airoha_eth_set_xpon_tcont_channel(priv->gdm_dev, 4, true);
++
++	__gpon_set_tcont_hw(priv, 5, 670, true);
++	priv->tcont_alloc_id[5] = 670;
++	priv->tcont_entity_id[5] = 0x8005;
++	airoha_eth_set_xpon_tcont_channel(priv->gdm_dev, 5, true);
++
+ 	ret = gpon_set_gem_port_hw(priv, gem_port_id, true, false);
+ 	if (ret) {
+ 		dev_err(priv->dev,

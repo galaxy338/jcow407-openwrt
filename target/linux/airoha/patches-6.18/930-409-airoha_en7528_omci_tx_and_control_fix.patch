@@ -1,0 +1,202 @@
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -4672,8 +4672,11 @@ static int econet_xmit_xpon_oam(struct n
+ 	if (ret)
+ 		return ret;
+ 	if (!skb || gem_port_id > FIELD_MAX(ETX_XPON_GEM_MASK) ||
+-	    !READ_ONCE(port->xpon_control_started))
++	    !READ_ONCE(port->xpon_control_started)) {
++		pr_warn_ratelimited("econet_xmit_xpon_oam: invalid args or control not started: skb=%p gem=%u started=%d\n",
++				    skb, gem_port_id, port ? READ_ONCE(port->xpon_control_started) : -1);
+ 		return -EINVAL;
++	}
+ 	if (READ_ONCE(port->xpon_tx_stopped))
+ 		return -ENETDOWN;
+ 	if (skb_linearize(skb))
+@@ -4689,6 +4692,8 @@ static int econet_xmit_xpon_oam(struct n
+ 	skb_set_queue_mapping(skb, 0);
+ 
+ 	ret = airoha_qdma_mips_xmit(port->qdma, skb, &msg, 0);
++	pr_debug("econet_xmit_xpon_oam: transmitted OAM frame len=%u chn=%u gem=%u ret=%d\n",
++		skb->len, channel, gem_port_id, ret);
+ 
+ 	return ret < 0 ? ret : 0;
+ }
+@@ -7955,7 +7960,7 @@ static netdev_tx_t __airoha_dev_xmit(str
+ 	qid = airoha_qdma_get_txq(qdma, xpon ? xpon->queue :
+ 				    skb_get_queue_mapping(skb));
+ 	if (xpon) {
+-		if (!airoha_is(qdma->eth, airoha_en7523))
++		if (!airoha_is(qdma->eth, airoha_en7523, econet_en7528))
+ 			goto error;
+ 
+ 		msg0 = FIELD_PREP(QDMA_ETH_TXMSG_QUEUE_MASK, xpon->queue) |
+@@ -10262,8 +10267,8 @@ static const struct airoha_eth_xpon_ops 
+ 	.register_link = airoha_xpon_register_link,
+ 	.unregister_link = airoha_xpon_unregister_link,
+ 	.update_link = airoha_xpon_update_link,
+-	.control_start = airoha_xpon_control_start,
+-	.control_stop = airoha_xpon_control_stop,
++	.control_start = econet_xpon_control_start,
++	.control_stop = econet_xpon_control_stop,
+ 	.dump_oam_rx_state = econet_xpon_dump_oam_rx_state,
+ 	.register_oam = econet_register_xpon_oam,
+ 	.unregister_oam = econet_unregister_xpon_oam,
+--- a/net/xpon/omci/core.c
++++ b/net/xpon/omci/core.c
+@@ -332,15 +332,19 @@ int omci_device_xmit(struct omci_device 
+ 	u32 tx_len;
+ 	int ret;
+ 
+-	if (!READ_ONCE(odev->started))
++	if (!READ_ONCE(odev->started)) {
++		pr_warn_ratelimited("omci_device_xmit: odev not started\n");
+ 		return -ENETDOWN;
++	}
+ 
+ 	spin_lock_bh(&odev->state_lock);
+ 	gem_port_id = odev->gem_port_id;
+ 	channel_up = odev->channel_up;
+ 	spin_unlock_bh(&odev->state_lock);
+-	if (!channel_up)
++	if (!channel_up) {
++		pr_warn_ratelimited("omci_device_xmit: channel not up\n");
+ 		return -ENOLINK;
++	}
+ 
+ 	tx_skb = alloc_skb(len, GFP_KERNEL);
+ 	if (!tx_skb)
+@@ -351,12 +355,15 @@ int omci_device_xmit(struct omci_device 
+ 		goto free_skb;
+ 
+ 	tx_len = tx_skb->len;
+ 	ret = odev->ops->xmit(odev, tx_skb, gem_port_id);
+-	if (ret)
++	if (ret) {
++		pr_warn("omci_device_xmit: ops->xmit failed: %d\n", ret);
+ 		goto free_skb;
++	}
+ 
+ 	atomic64_inc(&odev->tx_packets);
+ 	atomic64_add(tx_len, &odev->tx_bytes);
++	pr_debug("omci_device_xmit: successfully sent OMCI packet len=%u gem=%u\n", tx_len, gem_port_id);
+ 	return 0;
+ 
+ free_skb:
+--- a/net/xpon/omci/agent.c
++++ b/net/xpon/omci/agent.c
+@@ -4332,6 +4332,9 @@ void omci_agent_receive(struct omci_devi
+ 	int ret;
+ 
+ 	ret = omci_wire_decode(skb->data, skb->len, &request);
++	pr_debug("OMCI RX: ret=%d len=%u act=%u cls=%u ent=%u dev_id=%#x enabled=%d\n",
++		ret, skb->len, request.message_type & 0x1f, request.class_id,
++		request.entity_id, request.device_id, agent->enabled);
+ 	if (ret)
+ 		return;
+ 	omci_agent_log_wire(odev, "RX", skb->data, skb->len);
+@@ -4347,6 +4350,7 @@ void omci_agent_receive(struct omci_devi
+ 
+ 	mutex_lock(&agent->lock);
+ 	if (!agent->enabled) {
++		pr_warn("OMCI agent not enabled!\n");
+ 		mutex_unlock(&agent->lock);
+ 		goto out;
+ 	}
+@@ -4369,6 +4373,7 @@ void omci_agent_receive(struct omci_devi
+ 				content, content_len, response, OMCI_MAX_PDU_LEN,
+ 				&response_len);
+ 		if (ret) {
++			pr_warn("OMCI build/encode failed: ret=%d\n", ret);
+ 			mutex_unlock(&agent->lock);
+ 			goto out;
+ 		}
+@@ -4379,6 +4384,7 @@ void omci_agent_receive(struct omci_devi
+ 
+ 	omci_agent_log_wire(odev, "TX", response, response_len);
+ 	ret = omci_device_xmit(odev, response, response_len);
++	pr_debug("OMCI TX result: ret=%d resp_len=%zu\n", ret, response_len);
+ 	if (!ret) {
+ 		atomic64_inc(&agent->responses);
+ 		if (!duplicate && !fake && !unsupported) {
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -1001,10 +1001,13 @@
+ 	u32 cfg;
+ 	int ret, retry;
+ 
++	u8 onu_id = gpon_read(priv, GPON_ONU_ID) & ONU_ID_MASK;
++	bool is_omcc = (gem_port_id == 0 || gem_port_id == 17 || (onu_id && gem_port_id == onu_id));
++
+ 	if (gem_port_id >= GPON_MAX_GEM_ID)
+ 		return -EINVAL;
+ 
+-	if (gem_port_id == 0)
++	if (is_omcc)
+ 		encrypted = false;
+ 
+ 	cfg = GEM_CMD_WRITE | gem_port_id;
+@@ -1827,6 +1830,8 @@
+ 					u8 encrypt_mode)
+ {
+ 	struct xpon_priv *priv = hw_priv;
++	u8 onu_id = gpon_read(priv, GPON_ONU_ID) & ONU_ID_MASK;
++	bool is_omcc = (port_id == 0 || port_id == 17 || (onu_id && port_id == onu_id));
+ 	int ret;
+ 
+ 	/*
+@@ -1839,7 +1844,7 @@
+ 	 * high-entropy frames with random MACs and nonsense ethertypes, which
+ 	 * is ciphertext handed up undecrypted.
+ 	 */
+-	if (port_id && encrypt_mode == 3)
++	if (!is_omcc && (encrypt_mode == 2 || encrypt_mode == 3))
+ 		__set_bit(port_id, priv->encrypted_gems);
+ 	else
+ 		__clear_bit(port_id, priv->encrypted_gems);
+@@ -1851,8 +1856,8 @@
+ 			port_id, ret);
+ 	else
+ 		dev_info(priv->dev,
+-			 "GPON GEM encryption update: port=%u mode=%u\n",
+-			 port_id, encrypt_mode);
++			 "GPON GEM encryption update: port=%u mode=%u (omcc=%d encrypted=%d)\n",
++			 port_id, encrypt_mode, is_omcc, test_bit(port_id, priv->encrypted_gems));
+ }
+ 
+ static void gpon_cb_set_alloc_id(void *hw_priv, u16 alloc_id, bool allocate)
+@@ -2032,26 +2037,30 @@
+ 				     u8 direction, bool valid, bool encrypted)
+ {
+ 	struct xpon_priv *priv = hw_priv;
++	u8 onu_id = gpon_read(priv, GPON_ONU_ID) & ONU_ID_MASK;
++	bool is_omcc = (gem_port_id == 0 || gem_port_id == 17 || (onu_id && gem_port_id == onu_id));
+ 	int ret;
+ 
+ 	/*
+ 	 * The OLT may announce encryption with Encrypted_Port-ID before OMCI
+ 	 * creates the GEM port, as Nokia/ALCL OLTs do. Keep it when OMCI then
+ 	 * writes the port, as the vendor stack does, or the port is left
+-	 * passing ciphertext.
++	 * passing ciphertext. Never encrypt OMCC.
+ 	 */
+-	if (gem_port_id < GPON_MAX_GEM_ID &&
++	if (!is_omcc && gem_port_id < GPON_MAX_GEM_ID &&
+ 	    test_bit(gem_port_id, priv->encrypted_gems))
+ 		encrypted = true;
++	else if (is_omcc)
++		encrypted = false;
+ 	ret = gpon_set_gem_port_hw(priv, gem_port_id, valid, encrypted);
+ 	if (ret)
+ 		return ret;
+ 
+ 	gpon_refresh_netdev_link(priv, false);
+ 	dev_info(priv->dev,
+-		 "OMCI GEM port %u %s (ME %#x T-CONT %#x direction %u)\n",
++		 "OMCI GEM port %u %s (ME %#x T-CONT %#x direction %u encrypted=%d)\n",
+ 		 gem_port_id, valid ? "enabled" : "disabled", entity_id,
+-		 tcont_entity_id, direction);
++		 tcont_entity_id, direction, encrypted);
+ 	return 0;
+ }
+ 

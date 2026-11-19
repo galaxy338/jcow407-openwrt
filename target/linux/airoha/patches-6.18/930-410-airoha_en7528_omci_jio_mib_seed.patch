@@ -1,0 +1,54 @@
+--- a/net/xpon/omci/agent.c
++++ b/net/xpon/omci/agent.c
+@@ -1339,6 +1339,20 @@
+ }
+ 
+ static int
++omci_agent_seed_jio_locked(struct omci_device *odev, u8 profile)
++{
++	struct omci_agent *agent = &odev->agent;
++	u8 data[OMCI_MAX_ATTR_DATA] = {};
++
++	/* Pre-seed OLT-G with Radisys vendor RSYS */
++	memset(data, 0, sizeof(data));
++	memcpy(data, "RSYS", 4);
++	return omci_mib_add_default_profile_mask(agent, profile,
++			OMCI_CLASS_OLT_G, 0,
++			GENMASK(15, 14), data, sizeof(data));
++}
++
++static int
+ omci_agent_seed_profile_locked(struct omci_device *odev, u8 profile)
+ {
+ 	switch (profile) {
+@@ -1347,6 +1361,8 @@
+ 	case OMCI_OLT_PROFILE_NOKIA_ALCL:
+ 		return omci_agent_seed_nokia_locked(odev, profile);
+ 	default:
++		if (!memcmp(odev->agent.config.vendor_id, "SCOM", 4))
++			return omci_agent_seed_jio_locked(odev, profile);
+ 		return 0;
+ 	}
+ }
+@@ -1806,20 +1822,7 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	/* Also seed Slot 6 VEIP (0x0601) for compatibility with Alcatel-Lucent / EcoNet OLT profiles */
+-	memset(data, 0, sizeof(data));
+-	data[0] = 0;
+-	ret = omci_mib_add_default(agent, OMCI_CLASS_VEIP,
+-				   OMCI_UNI_ENTITY_ID(6, 1), data,
+-				   sizeof(data));
+-	if (ret)
+-		return ret;
+-	omci_uni_g_default_data(data);
+-	ret = omci_mib_add_default_mask(agent, OMCI_CLASS_UNI_G,
+-					OMCI_UNI_ENTITY_ID(6, 1),
+-					GENMASK(15, 12), data, sizeof(data));
+-	if (ret)
+-		return ret;
++
+ 
+ 	for (i = 0; i < topology.tcont_count; i++) {
+ 		u16 scheduler_id = topology.scheduler_base + i;

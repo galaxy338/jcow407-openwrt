@@ -1,0 +1,98 @@
+Subject: [PATCH] net: airoha: gpon: take Alloc-IDs and GEM ports from the OLT only
+
+Drop two bring-up shortcuts:
+
+- T-CONTs 1-5 were armed with Alloc-IDs 666-670 as soon as the OMCC came
+  up. Alloc-IDs are assigned per activation. An ONU that arms one it was
+  not given answers bandwidth-map grants addressed to another ONU. The
+  Assign_Alloc-ID and OMCI T-CONT paths already programme the hardware
+  and bind the channel when the OLT assigns one; T-CONT ME 0x8000 + n
+  then lands on channel n + 1 as on the vendor firmware.
+- Frames matching no provisioned service were sent on GEM port 17,
+  T-CONT 1. GEM port 17 is the OMCC here, not a data port. Drop such
+  frames again.
+
+Alloc-IDs are 12 bits wide in ITU-T G.984.3, in both the bandwidth map
+and Assign_Alloc-ID, so restore the 12-bit register masks.
+---
+--- a/drivers/net/ethernet/airoha/airoha_xpon.h
++++ b/drivers/net/ethernet/airoha/airoha_xpon.h
+@@ -241,7 +241,8 @@ struct airoha_xpon_match_data {
+ #define PLOAMd_FIFO_USED_MASK	0xFF
+ 
+ /* G_TCONT_ID pair register */
+-#define TCONT_ID_MASK		0x3FFF
++/* ITU-T G.984.3 Alloc-IDs are 12 bits wide. */
++#define TCONT_ID_MASK		0x0FFF
+ #define TCONT0_VALID		BIT(15)
+ #define TCONT1_ID_SHIFT		16
+ #define TCONT1_VALID		BIT(31)
+@@ -251,7 +252,7 @@ struct airoha_xpon_match_data {
+ #define TCONT16_CMD_EXEC	BIT(31)
+ #define TCONT16_VALID		BIT(27)
+ #define TCONT16_IDX_SHIFT	16
+-#define TCONT16_ALLOC_MASK	0x3FFF
++#define TCONT16_ALLOC_MASK	0x0FFF
+ 
+ /* G_TCONT_ID_16_31_STS */
+ #define TCONT16_CMD_DONE	BIT(31)
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -1765,32 +1765,14 @@ static int gpon_cb_set_omci_gem(void *hw
+ 		return ret;
+ 	}
+ 
+-	priv->tcont_entity_id[0] = 0x8000;
+-	__gpon_set_tcont_hw(priv, 1, 666, true);
+-	priv->tcont_alloc_id[1] = 666;
+-	priv->tcont_entity_id[1] = 0x8001;
+-	airoha_eth_set_xpon_tcont_channel(priv->gdm_dev, 1, true);
+-
+-	__gpon_set_tcont_hw(priv, 2, 667, true);
+-	priv->tcont_alloc_id[2] = 667;
+-	priv->tcont_entity_id[2] = 0x8002;
+-	airoha_eth_set_xpon_tcont_channel(priv->gdm_dev, 2, true);
+-
+-	__gpon_set_tcont_hw(priv, 3, 668, true);
+-	priv->tcont_alloc_id[3] = 668;
+-	priv->tcont_entity_id[3] = 0x8003;
+-	airoha_eth_set_xpon_tcont_channel(priv->gdm_dev, 3, true);
+-
+-	__gpon_set_tcont_hw(priv, 4, 669, true);
+-	priv->tcont_alloc_id[4] = 669;
+-	priv->tcont_entity_id[4] = 0x8004;
+-	airoha_eth_set_xpon_tcont_channel(priv->gdm_dev, 4, true);
+-
+-	__gpon_set_tcont_hw(priv, 5, 670, true);
+-	priv->tcont_alloc_id[5] = 670;
+-	priv->tcont_entity_id[5] = 0x8005;
+-	airoha_eth_set_xpon_tcont_channel(priv->gdm_dev, 5, true);
+-
++	/*
++	 * Only the default Alloc-ID, equal to the ONU-ID and carrying the
++	 * OMCC, exists at this point. Every other Alloc-ID belongs to the
++	 * OLT: it arrives in an Assign_Alloc-ID PLOAM message or an OMCI
++	 * T-CONT Set, and differs from one activation to the next. Arming
++	 * one the OLT has not assigned would answer bandwidth-map grants
++	 * meant for another ONU on the PON.
++	 */
+ 	ret = gpon_set_gem_port_hw(priv, gem_port_id, true, false);
+ 	if (ret) {
+ 		dev_err(priv->dev,
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -3926,8 +3926,12 @@ static int econet_xpon_lookup_service(st
+ 	}
+ 	spin_unlock_bh(&port->xpon_service_lock);
+ 
+-	if (!fallback) { info->gem_port_id = 17; info->tcont = 1; info->queue = 0; info->oam = false; }
+-	return 0;
++	/*
++	 * No service means the OLT has provisioned no GEM port for this
++	 * traffic. There is nowhere to send it: the only other port is the
++	 * OMCC, which carries OMCI and nothing else.
++	 */
++	return fallback ? 0 : -ENOENT;
+ }
+ 
+ static int econet_xpon_classify(struct airoha_gdm_dev *port,

@@ -1,0 +1,109 @@
+Subject: [PATCH] net: airoha: gpon: keep subscriber identity out of the kernel
+
+Make the image usable with any subscription:
+
+- Do not default the GPON serial number to one subscriber's. The serial,
+  password and the rest of the ONU identity come from the device tree,
+  NVMEM or userspace (UCI / LuCI through xpon-agent).
+- Do not pre-seed OLT-G with a vendor. The OLT writes it.
+- Do not treat GEM port 17 as the OMCC. The OMCC is the port the OLT
+  configured, which defaults to the ONU-ID; ask the hardware.
+---
+--- a/net/xpon/omci/agent.c
++++ b/net/xpon/omci/agent.c
+@@ -1379,20 +1379,6 @@ omci_agent_seed_nokia_locked(struct omci
+ }
+ 
+ static int
+-omci_agent_seed_jio_locked(struct omci_device *odev, u8 profile)
+-{
+-	struct omci_agent *agent = &odev->agent;
+-	u8 data[OMCI_MAX_ATTR_DATA] = {};
+-
+-	/* Pre-seed OLT-G with Radisys vendor RSYS */
+-	memset(data, 0, sizeof(data));
+-	memcpy(data, "RSYS", 4);
+-	return omci_mib_add_default_profile_mask(agent, profile,
+-			OMCI_CLASS_OLT_G, 0,
+-			GENMASK(15, 14), data, sizeof(data));
+-}
+-
+-static int
+ omci_agent_seed_profile_locked(struct omci_device *odev, u8 profile)
+ {
+ 	switch (profile) {
+@@ -1401,8 +1387,6 @@ omci_agent_seed_profile_locked(struct om
+ 	case OMCI_OLT_PROFILE_NOKIA_ALCL:
+ 		return omci_agent_seed_nokia_locked(odev, profile);
+ 	default:
+-		if (!memcmp(odev->agent.config.vendor_id, "SCOM", 4))
+-			return omci_agent_seed_jio_locked(odev, profile);
+ 		return 0;
+ 	}
+ }
+@@ -1950,7 +1934,7 @@ int omci_agent_init(struct omci_device *
+ 	agent->config.olt_profile_force = OMCI_OLT_PROFILE_UNSPEC;
+ 	agent->config.olt_profile_source = OMCI_CONFIG_SOURCE_DEFAULT;
+ 	agent->config.olt_profile_force_source = OMCI_CONFIG_SOURCE_DEFAULT;
+-	memcpy(agent->config.serial_number, "SCOM1F821896", 8);
++	memcpy(agent->config.serial_number, "OPEN0001", 8);
+ 	memcpy(agent->config.vendor_id, "SCOM", 4);
+ 	strscpy(agent->config.version, "RP0201", sizeof(agent->config.version));
+ 	strscpy(agent->config.software_version[0], "JCOW414_R2.59.1",
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -973,6 +973,24 @@ static int gpon_tcont_entity_to_index(st
+ 	return found < 0 ? found : 0;
+ }
+ 
++/*
++ * The OMCC is never encrypted (ITU-T G.984.3). It runs on the GEM port the
++ * OLT configured for it, which by default carries the ONU-ID as its Port-ID;
++ * Port-ID 0 is kept for OLTs that use it before assigning one.
++ */
++static bool gpon_is_omcc_gem(struct xpon_priv *priv, u16 gem_port_id)
++{
++	u32 omci = gpon_read(priv, GPON_OMCI_ID);
++	u8 onu_id = gpon_read(priv, GPON_ONU_ID) & ONU_ID_MASK;
++
++	if (!gem_port_id)
++		return true;
++	if ((omci & OMCI_PORT_VLD) && gem_port_id == (omci & OMCI_GPID_MASK))
++		return true;
++
++	return onu_id && gem_port_id == onu_id;
++}
++
+ static int gpon_read_gem_port_hw(struct xpon_priv *priv, u16 gem_port_id,
+ 				 bool *valid, bool *encrypted)
+ {
+@@ -1001,8 +1019,7 @@ static int gpon_set_gem_port_hw(struct x
+ 	u32 cfg;
+ 	int ret, retry;
+ 
+-	u8 onu_id = gpon_read(priv, GPON_ONU_ID) & ONU_ID_MASK;
+-	bool is_omcc = (gem_port_id == 0 || gem_port_id == 17 || (onu_id && gem_port_id == onu_id));
++	bool is_omcc = gpon_is_omcc_gem(priv, gem_port_id);
+ 
+ 	if (gem_port_id >= GPON_MAX_GEM_ID)
+ 		return -EINVAL;
+@@ -1812,8 +1829,7 @@ static void gpon_cb_set_gem_encryption(v
+ 					u8 encrypt_mode)
+ {
+ 	struct xpon_priv *priv = hw_priv;
+-	u8 onu_id = gpon_read(priv, GPON_ONU_ID) & ONU_ID_MASK;
+-	bool is_omcc = (port_id == 0 || port_id == 17 || (onu_id && port_id == onu_id));
++	bool is_omcc = gpon_is_omcc_gem(priv, port_id);
+ 	int ret;
+ 
+ 	/*
+@@ -2019,8 +2035,7 @@ int airoha_gpon_omci_hw_set_gem_port(voi
+ 				     u8 direction, bool valid, bool encrypted)
+ {
+ 	struct xpon_priv *priv = hw_priv;
+-	u8 onu_id = gpon_read(priv, GPON_ONU_ID) & ONU_ID_MASK;
+-	bool is_omcc = (gem_port_id == 0 || gem_port_id == 17 || (onu_id && gem_port_id == onu_id));
++	bool is_omcc = gpon_is_omcc_gem(priv, gem_port_id);
+ 	int ret;
+ 
+ 	/*

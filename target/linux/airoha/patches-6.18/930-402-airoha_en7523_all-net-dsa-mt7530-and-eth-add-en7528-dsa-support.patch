@@ -1,0 +1,119 @@
+From e9b418a000000000000000000000000000000001 Mon Sep 17 00:00:00 2001
+From: Antigravity <antigravity@google.com>
+Date: Thu, 5 Nov 2026 22:38:00 +0530
+Subject: [PATCH] net: dsa: mt7530 and airoha_eth: add EN7528 DSA and special tag support
+
+Wire up ID_EN7528 in mt7530 DSA driver (CPU port map, special tag config,
+port 6 MAC setup, and mirror registers) and in airoha_eth (oversize len,
+QDMA TX queue and in-band MTK special tag extraction).
+
+Signed-off-by: Uday Khare <uday@home.arpa>
+---
+--- a/drivers/net/dsa/mt7530.c
++++ b/drivers/net/dsa/mt7530.c
+@@ -1822,7 +1822,7 @@
+ 	 */
+ 	if (priv->id == ID_MT7531 || priv->id == ID_MT7988 ||
+ 	    priv->id == ID_EN7581 || priv->id == ID_AN7583 ||
+-			priv->id == ID_EN7523)
++	    priv->id == ID_EN7523 || priv->id == ID_EN7528)
+ 		mt7530_set(priv, MT7531_CFC, MT7531_CPU_PMAP(BIT(port)));
+ 
+ 	/* CPU port gets connected to all user ports of the switch. */
+@@ -3185,7 +3185,8 @@
+ 	mt7530_set(priv, MT753X_AGC, LOCAL_EN);
+ 
+ 	/* Enable Special Tag for rx frames */
+-	if (priv->id == ID_EN7581 || priv->id == ID_AN7583 || priv->id == ID_EN7523)
++	if (priv->id == ID_EN7581 || priv->id == ID_AN7583 ||
++	    priv->id == ID_EN7523 || priv->id == ID_EN7528)
+ 		mt7530_write(priv, MT753X_CPORT_SPTAG_CFG,
+ 			     CPORT_SW2FE_STAG_EN | CPORT_FE2SW_STAG_EN);
+ 
+@@ -3927,7 +3928,7 @@
+ 			   AN7583_CSR_PHY_CORE_REG_CLK_SEL |
+ 			   FIELD_PREP(AN7583_CSR_ETHER_AFE_PWD, 0));
+ 
+-	if (priv->id == ID_EN7523) {
++	if (priv->id == ID_EN7523 || priv->id == ID_EN7528) {
+ 		mt7530_set(priv, MT753X_PMCR_P(6), MT7530_RXCRC_EN |
+ 			   PMCR_IFG_XMIT(1) |
+ 			   PMCR_MAC_MODE |
+--- a/drivers/net/dsa/mt7530.h
++++ b/drivers/net/dsa/mt7530.h
+@@ -76,20 +76,23 @@
+ 					  id == ID_MT7988 || \
+ 					  id == ID_EN7581 || \
+ 					  id == ID_AN7583 || \
+-					  id == ID_EN7523) ? \
++					  id == ID_EN7523 || \
++					  id == ID_EN7528) ? \
+ 					 MT7531_CFC : MT753X_MFC)
+ 
+ #define MT753X_MIRROR_EN(id)		((id == ID_MT7531 || \
+ 					  id == ID_MT7988 || \
+ 					  id == ID_EN7581 || \
+-					  id == ID_EN7523) ? \
++					  id == ID_EN7523 || \
++					  id == ID_EN7528) ? \
+ 					 MT7531_MIRROR_EN : MT7530_MIRROR_EN)
+ 
+ #define MT753X_MIRROR_PORT_MASK(id)	((id == ID_MT7531 || \
+ 					  id == ID_MT7988 || \
+ 					  id == ID_EN7581 || \
+ 					  id == ID_AN7583 || \
+-					  id == ID_EN7523) ? \
++					  id == ID_EN7523 || \
++					  id == ID_EN7528) ? \
+ 					 MT7531_MIRROR_PORT_MASK : \
+ 					 MT7530_MIRROR_PORT_MASK)
+ 
+@@ -97,7 +100,8 @@
+ 					  id == ID_MT7988 || \
+ 					  id == ID_EN7581 || \
+ 					  id == ID_AN7583 || \
+-					  id == ID_EN7523) ? \
++					  id == ID_EN7523 || \
++					  id == ID_EN7528) ? \
+ 					 MT7531_MIRROR_PORT_GET(val) : \
+ 					 MT7530_MIRROR_PORT_GET(val))
+ 
+@@ -105,7 +109,8 @@
+ 					  id == ID_MT7988 || \
+ 					  id == ID_EN7581 || \
+ 					  id == ID_AN7583 || \
+-					  id == ID_EN7523) ? \
++					  id == ID_EN7523 || \
++					  id == ID_EN7528) ? \
+ 					 MT7531_MIRROR_PORT_SET(val) : \
+ 					 MT7530_MIRROR_PORT_SET(val))
+ 
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -3840,7 +3840,7 @@
+ 	 * bare MTU wire length causes otherwise valid full-sized frames to be
+ 	 * classified as long packets and dropped before they reach QDMA/PPE.
+ 	 */
+-	if (airoha_is(port->eth, econet_en751221, econet_en7580) &&
++	if (airoha_is(port->eth, econet_en751221, econet_en7528, econet_en7580) &&
+ 	    port->fport == ETX_FPORT_GDM1)
+ 		len = max_t(u16, len, EN751221_GDM1_LONG_LEN);
+ 
+@@ -4016,7 +4016,7 @@
+ 		channel = xpon_info.tcont;
+ 		set_etx_queue(&msg.etx, xpon_info.queue);
+ 		set_etx_xpon_gem(&msg.etx, xpon_info.gem_port_id);
+-	} else if (airoha_is(port->eth, econet_en751221)) {
++	} else if (airoha_is(port->eth, econet_en751221, econet_en7528)) {
+ 		/*
+ 		 * The EN751221 vendor LAN path does not map Linux flow/hash
+ 		 * queues onto QDMA's eight hardware QoS queues.  Unless QoS
+@@ -4062,7 +4062,7 @@
+ 	 * Airoha QDMA which can move it to descriptor metadata. The logical
+ 	 * port-mask/channel classification is nevertheless shared.
+ 	 */
+-	if (!xpon && airoha_is(port->eth, econet_en751221)) {
++	if (!xpon && airoha_is(port->eth, econet_en751221, econet_en7528)) {
+ 		airoha_qdma_skb_get_mtk_meta(skb, dev, AIROHA_MTK_TAG_IN_SKB,
+ 					     &skb_meta);
+ 		if (skb_meta.has_mtk_tag &&

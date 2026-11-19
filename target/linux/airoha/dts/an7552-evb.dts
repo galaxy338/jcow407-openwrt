@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/dts-v1/;
+
+/memreserve/ 0x80000000 0x200000;
+
+#include "an7563-evb.dts"
+
+/ {
+	model = "Airoha AN7552 Ethernet Evaluation Board";
+	compatible = "airoha,an7552-evb", "airoha,an7552";
+};

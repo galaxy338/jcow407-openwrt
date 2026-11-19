@@ -1,0 +1,105 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+
+BOARD=$(board_name)
+
+# Web UI concurrency (safe to repeat on every upgrade)
+uci -q delete uhttpd.main.lua_prefix
+uci set uhttpd.main.max_requests='10'
+uci commit uhttpd
+
+# System logging: suppress noisy kernel informational logs on console and klogd
+uci -q set system.@system[0].conloglevel='4'
+uci -q set system.@system[0].klogconloglevel='4'
+uci commit system
+
+# Firewall Flow Offloading (Fastpath packet acceleration)
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q commit firewall
+
+# Everything below is first-install setup only. On an upgrade the saved
+# configuration already has a WAN and must not be overwritten.
+uci -q get network.wan.device >/dev/null && exit 0
+
+# 1. LAN: Default to standard 192.168.1.1/24, gateway and DHCP server
+uci set network.lan.proto='static'
+uci set network.lan.ipaddr='192.168.1.1'
+uci set network.lan.netmask='255.255.255.0'
+uci -q delete network.lan.gateway
+uci -q delete network.lan.dns
+uci set dhcp.lan.ignore='0'
+uci set dhcp.lan.ra='server'
+uci set dhcp.lan.dhcpv6='server'
+
+# 2. WAN on the PON, JioFiber IPoE on VLAN 1015
+uci set network.wan=interface
+uci set network.wan.device='pon0.1015'
+uci set network.wan.proto='dhcp'
+uci set network.wan.hostname='*'
+uci set network.wan.metric='10'
+
+uci set network.wan6=interface
+uci set network.wan6.device='pon0.1015'
+uci set network.wan6.proto='dhcpv6'
+uci set network.wan6.reqaddress='try'
+uci set network.wan6.reqprefix='auto'
+
+# 3. Enable xPON / OMCI agent
+uci -q set xpon.main.enabled='1'
+uci -q set xpon.main.netdev='pon0'
+uci -q set xpon.main.equipment_id='ECONET'
+uci -q set xpon.main.traffic_management_option='2'
+
+case "$BOARD" in
+    jiofiber,jcow407)
+        uci -q set xpon.main.vendor_id='SKYW'
+        uci -q set xpon.main.hardware_version='RP0101'
+        uci -q set xpon.main.software_version_0='SKYWTF1_JCOW407_R2.42'
+        uci -q set xpon.main.software_version_1='SKYWTF1_JCOW407_R2.42'
+        SSID_2G='OpenWrt-JCOW407-2.4G'
+        SSID_5G='OpenWrt-JCOW407-5G'
+        ;;
+    *)
+        uci -q set xpon.main.vendor_id='SCOM'
+        uci -q set xpon.main.hardware_version='RP0201'
+        uci -q set xpon.main.software_version_0='JCOW414_R2.59'
+        uci -q set xpon.main.software_version_1='JCOW414_R2.59'
+        SSID_2G='OpenWrt-JCOW414-2.4G'
+        SSID_5G='OpenWrt-JCOW414-5G'
+        ;;
+esac
+uci -q commit xpon
+
+# 4. Wi-Fi Configuration
+[ -f /etc/config/wireless ] || wifi config
+
+# 2.4GHz Radio (radio0)
+uci -q set wireless.radio0.channel='6'
+uci -q set wireless.radio0.htmode='HT20'
+uci -q set wireless.radio0.country='IN'
+uci -q set wireless.radio0.disabled='0'
+uci -q set wireless.default_radio0.disabled='0'
+uci -q set wireless.default_radio0.ssid="$SSID_2G"
+uci -q set wireless.default_radio0.encryption='psk2'
+uci -q set wireless.default_radio0.key='openwrt123'
+uci -q set wireless.default_radio0.network='lan'
+
+# 5GHz Radio (radio1)
+uci -q set wireless.radio1.channel='36'
+uci -q set wireless.radio1.htmode='VHT80'
+uci -q set wireless.radio1.country='IN'
+uci -q set wireless.radio1.disabled='0'
+uci -q set wireless.default_radio1.disabled='0'
+uci -q set wireless.default_radio1.ssid="$SSID_5G"
+uci -q set wireless.default_radio1.encryption='psk2'
+uci -q set wireless.default_radio1.key='openwrt123'
+uci -q set wireless.default_radio1.network='lan'
+
+# 5. Commit all changes
+uci commit network
+uci commit dhcp
+uci commit wireless
+
+exit 0

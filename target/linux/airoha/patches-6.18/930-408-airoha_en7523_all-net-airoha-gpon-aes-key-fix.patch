@@ -1,0 +1,151 @@
+--- a/drivers/net/ethernet/airoha/airoha_xpon.h
++++ b/drivers/net/ethernet/airoha/airoha_xpon.h
+@@ -85,6 +85,9 @@
+ #define GPON_AES_CFG		0x060
+ #define GPON_AES_ACTIVE_KEY0	0x064	/* 4 × 32-bit, read-only */
+ #define GPON_AES_SHADOW_KEY0	0x074	/* 4 × 32-bit, write to program */
++#define GPON_AES_SW_SWITCH	0x084	/* SW manual key switch: write bit 0, poll bit 31 */
++#define AES_SW_SWITCH_START	BIT(0)
++#define AES_SW_SWITCH_DONE	BIT(31)
+ /* PLOu burst parameters */
+ #define GPON_PLOu_OVERHEAD	0x090
+ #define GPON_PLOu_GUARD_BIT	0x094
+@@ -133,6 +136,7 @@
+ #define GPON_DBG_GEM_HEC_ONE_ERR_CNT	0x330
+ #define GPON_DBG_GEM_HEC_TWO_ERR_CNT	0x334
+ #define GPON_DBG_GEM_HEC_UC_ERR_CNT	0x338
++#define GPON_DS_SPF_CNT		0x358	/* Downstream superframe counter */
+ /* Debug / TX sync (EN7521 EqD adjustment) */
+ #define GPON_DBG_TX_SYNC_OFFSET	0x35C
+ /* Power management (always-on domain) */
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -806,8 +806,7 @@
+ 		sn_cfg, sn_req_threshold, tx_power_mode, random_delay);
+ }
+ 
+-static void gpon_load_aes_shadow(struct xpon_priv *priv, const u8 key[16],
+-				  u32 switch_superframe)
++static void gpon_load_aes_shadow(struct xpon_priv *priv, const u8 key[16])
+ {
+ 	int i;
+ 
+@@ -820,9 +819,6 @@
+ 	for (i = 0; i < 4; i++)
+ 		gpon_write(priv, GPON_AES_SHADOW_KEY0 + i * 4,
+ 			   get_unaligned_be32(key + (3 - i) * 4));
+-
+-	gpon_write(priv, GPON_AES_CFG,
+-		   switch_superframe & AES_KEY_SWITCH_CNT_MASK);
+ }
+ 
+ static int __gpon_set_tcont_hw(struct xpon_priv *priv, unsigned int index,
+@@ -1557,23 +1553,55 @@
+ 			 ret);
+ }
+ 
++static int gpon_aes_key_switch_sw(struct xpon_priv *priv)
++{
++	int ret;
++
++	/*
++	 * Stock gponDevSetAesKeySwitchBySw (0x14c1c):
++	 * Write 1 to bit 0 of 0x4084 (GPON_AES_SW_SWITCH).
++	 * Poll bit 31 (AES_SW_SWITCH_DONE) for completion.
++	 */
++	gpon_write(priv, GPON_AES_SW_SWITCH, AES_SW_SWITCH_START);
++	ret = gpon_wait_bits(priv, GPON_AES_SW_SWITCH, AES_SW_SWITCH_DONE,
++			     GPON_CMD_TIMEOUT_US);
++	if (ret)
++		dev_warn(priv->dev, "GPON AES SW key switch timeout: %#08x\n",
++			 gpon_read(priv, GPON_AES_SW_SWITCH));
++	else
++		dev_dbg(priv->dev, "GPON AES SW key switch completed successfully: %#08x\n",
++			 gpon_read(priv, GPON_AES_SW_SWITCH));
++	return ret;
++}
++
+ static void gpon_cb_set_key_switch_time(void *hw_priv, u32 superframe)
+ {
+ 	struct xpon_priv *priv = hw_priv;
++	u32 val;
++	u32 target_spf = superframe & AES_KEY_SWITCH_CNT_MASK;
++
++	dev_dbg(priv->dev, "GPON AES key switch superframe=%u (current spf=%#x)\n",
++		 target_spf, gpon_read(priv, GPON_DS_SPF_CNT));
+ 
+-	dev_info(priv->dev, "GPON AES key switch superframe=%u\n",
+-		 superframe & AES_KEY_SWITCH_CNT_MASK);
+-	gpon_write(priv, GPON_AES_CFG, superframe & AES_KEY_SWITCH_CNT_MASK);
++	if (target_spf == 0) {
++		/* Match stock gponDevSetKeySwithTime: if superframe == 0, trigger SW switch */
++		gpon_aes_key_switch_sw(priv);
++	} else {
++		/* Program hardware to switch at target superframe, preserving bits 30..31 */
++		val = gpon_read(priv, GPON_AES_CFG);
++		val = (val & ~AES_KEY_SWITCH_CNT_MASK) | target_spf;
++		gpon_write(priv, GPON_AES_CFG, val);
++	}
+ }
+ 
+ static void gpon_cb_request_new_key(void *hw_priv)
+ {
+ 	struct xpon_priv *priv = hw_priv;
+ 
+-	dev_info(priv->dev, "GPON generating a new AES key\n");
+ 	get_random_bytes(priv->aes_key, 16);
++	dev_dbg(priv->dev, "GPON generating a new AES key: %16phN\n", priv->aes_key);
+ 	/* Load into shadow registers; switch time set later by Key_Switching_Time */
+-	gpon_load_aes_shadow(priv, priv->aes_key, 0);
++	gpon_load_aes_shadow(priv, priv->aes_key);
+ 	/* Inform PLOAM layer of the key so it can transmit Encryption_Key */
+ 	ploam_set_aes_key(priv->ploam, priv->aes_key);
+ }
+@@ -2523,7 +2551,7 @@
+ 	}
+ 
+ 	gpon_set_serial_number_regs(priv);
+-	gpon_load_aes_shadow(priv, priv->aes_key, 0);
++	gpon_load_aes_shadow(priv, priv->aes_key);
+ 
+ 	/*
+ 	 * Inspect events accumulated while the digital PHY was locking. Known
+@@ -3144,6 +3172,18 @@
+ 			dev_warn_ratelimited(priv->dev,
+ 					     "GPON loss of GEM delineation interrupt\n");
+ 
++		if (active & INT_AES_KEY_SWITCH_DONE) {
++			dev_dbg(priv->dev, "GPON IRQ: AES key switch done (active: %08x %08x %08x %08x, shadow: %08x %08x %08x %08x)\n",
++				 gpon_read(priv, GPON_AES_ACTIVE_KEY0),
++				 gpon_read(priv, GPON_AES_ACTIVE_KEY0 + 4),
++				 gpon_read(priv, GPON_AES_ACTIVE_KEY0 + 8),
++				 gpon_read(priv, GPON_AES_ACTIVE_KEY0 + 12),
++				 gpon_read(priv, GPON_AES_SHADOW_KEY0),
++				 gpon_read(priv, GPON_AES_SHADOW_KEY0 + 4),
++				 gpon_read(priv, GPON_AES_SHADOW_KEY0 + 8),
++				 gpon_read(priv, GPON_AES_SHADOW_KEY0 + 12));
++		}
++
+ 		if (active & GPON_INT_ERROR_MASK)
+ 			gpon_dump_error_counters(priv, active &
+ 					 (u32)GPON_INT_ERROR_MASK);
+--- a/drivers/net/ethernet/airoha/airoha_ploam.c
++++ b/drivers/net/ethernet/airoha/airoha_ploam.c
+@@ -466,15 +466,11 @@
+ 		return;
+ 
+ 	pp->key_exchange_pending = true;
++	pp->key_idx ^= 1;
+ 	/* Hardware generates a random key and loads shadow regs */
+ 	pp->ops->request_new_key(pp->hw_priv);
+-	/*
+-	 * Announce the key under the index the OLT is still using and only
+-	 * then flip: toggling first sends Encryption_Key with the index of a
+-	 * key the OLT has not been given yet.
+-	 */
++	pr_debug("airoha_ploam: transmitting Encryption_Key key_idx=%u\n", pp->key_idx);
+ 	ploam_send_encrypt_key(pp);
+-	pp->key_idx ^= 1;
+ }
+ 
+ /* PLOAM_DOWN_CONFIGURE_PORT_ID (0x0E) — unicast */

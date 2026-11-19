@@ -1,0 +1,11 @@
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -460,7 +460,7 @@ static void gpon_refresh_netdev_link(str
+ 	o5 = priv->gpon_o5;
+ 	omci = priv->omci_operational;
+ 	service = !bitmap_empty(priv->service_gems, GPON_MAX_GEM_ID);
+-	link = started && o5 && omci && service;
++	link = started && o5 && (service || omci);
+ 	changed = force || priv->netdev_link != link;
+ 	priv->netdev_link = link;
+ 	mutex_unlock(&priv->link_state_lock);

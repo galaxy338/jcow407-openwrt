@@ -1,0 +1,149 @@
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -598,14 +598,20 @@
+ 	 * 0x4208 reset image, but does not use the EN7523 DBA/BWmap defaults.
+ 	 */
+ 	if (priv->match_data->en7523_gpon_defaults ||
+-	    priv->match_data->gpon_reset_dbg_dly)
+-		gpon_write(priv, GPON_DBG_DLY, DBG_DLY_RESET_DEFAULT);
++	    priv->match_data->gpon_reset_dbg_dly) {
++		u32 reset_val = (priv->match_data->version == econet_en7528) ?
++				0x800f0040 : DBG_DLY_RESET_DEFAULT;
++		gpon_write(priv, GPON_DBG_DLY, reset_val);
++	}
+ 	gpon_rmw(priv, GPON_DBG_DLY, DBG_DLY_FINE_INT_MASK,
+ 		 FIELD_PREP(DBG_DLY_FINE_INT_MASK,
+ 			    priv->match_data->gpon_fine_delay));
+ 	gpon_rmw(priv, GPON_DBG_IDLE_GEM_THLD, GENMASK(15, 0),
+ 		 priv->match_data->gpon_idle_gem_threshold);
+ 
++	if (priv->match_data->version == econet_en7528)
++		gpon_write(priv, GPON_DBG_TX_SYNC_OFFSET, 0x00000002);
++
+ 	if (priv->match_data->en7523_gpon_defaults) {
+ 		gpon_rmw(priv, GPON_GBL_CFG, GBL_CFG_SR_BLK_SIZE_MASK,
+ 			 GPON_DBRU_BLOCK_SIZE_48B);
+@@ -682,15 +688,17 @@
+ 	 */
+ 	sn_cfg = gpon_read(priv, GPON_SN_MSG_CFG);
+ 	sn_cfg &= ~(SN_MSG_CFG_SN_REQ_THR_MASK |
++		    SN_MSG_CFG_TX_POWER_MODE_MASK |
+ 		    SN_MSG_CFG_RANDOM_DELAY_MASK);
+ 	sn_cfg |= FIELD_PREP(SN_MSG_CFG_SN_REQ_THR_MASK,
+ 			     GPON_SN_REQ_THRESHOLD);
+ 	if (priv->match_data->gpon_sn_tx_power_mode) {
+-		sn_cfg &= ~SN_MSG_CFG_TX_POWER_MODE_MASK;
+ 		sn_cfg |= FIELD_PREP(SN_MSG_CFG_TX_POWER_MODE_MASK,
+ 				     priv->match_data->gpon_sn_tx_power_mode);
+ 	}
+ 	gpon_write(priv, GPON_SN_MSG_CFG, sn_cfg);
++	if (priv->match_data->version == econet_en7528)
++		gpon_write(priv, GPON_DBG_TX_SYNC_OFFSET, 0x00000002);
+ 	priv->byte_delay = 0;
+ 	priv->bit_delay = 0;
+ }
+@@ -4663,10 +4671,11 @@
+ 	.version = econet_en7528,
+ 	.mode_from_dt = true,
+ 	.wan_mode_mask = EN7528_SCU_WAN_MODE_MASK,
+-	.gpon_fine_delay = 0x1c,
++	.gpon_fine_delay = 0x14,
+ 	.gpon_rsp_time_activation = GPON_RSP_TIME_ACT_EN7528,
+ 	.gpon_idle_gem_threshold = GPON_IDLE_GEM_THLD_DEFAULT,
+-	.gpon_sn_tx_power_mode = GPON_SN_TX_POWER_MODE_LEGACY,
++	.gpon_guard_bits_override = GPON_PHY_GUARD_BIT_NUM,
++	.gpon_sn_tx_power_mode = 0,
+ 	.gpon_reset_dbg_dly = true,
+ 	.mac_irq_via_eth = true,
+ 	.gpon_reset_on_start = true,
+--- a/drivers/net/ethernet/airoha/airoha_ploam.c
++++ b/drivers/net/ethernet/airoha/airoha_ploam.c
+@@ -287,6 +287,8 @@
+ 	if (pp->state != GPON_O3_SERIAL_NUMBER)
+ 		return;
+ 
++	pr_debug("airoha_ploam: received ASSIGN_ONU_ID: id=%u sn=%8phN our_sn=%8phN\n",
++		c[0], &c[1], pp->sn);
+ 	/* c[0]=new ONU-ID, c[1..8]=SN for verification */
+ 	if (memcmp(&c[1], pp->sn, 8) != 0)
+ 		return;
+@@ -404,6 +406,7 @@
+ {
+ 	if (onu_id != pp->onu_id)
+ 		return;
++	pr_debug("airoha_ploam: received REQUEST_PASSWORD for onu_id=%u state=%d\n", onu_id, pp->state);
+ 	if (pp->state == GPON_O5_OPERATION)
+ 		ploam_send_password(pp);
+ }
+--- a/drivers/phy/airoha/phy-airoha-xpon.c
++++ b/drivers/phy/airoha/phy-airoha-xpon.c
+@@ -932,8 +932,14 @@
+ 	airoha_xpon_phy_write(priv, XPON_INT_STATUS_CLR, val);
+ 	airoha_xpon_phy_write(priv, XPON_INT_ENABLE, 0);
+ 
+-	airoha_xpon_phy_rmw(priv, XPON_PHYFWREADY, XPON_PHYFWREADY_READY,
+-			    XPON_PHYFWREADY_READY);
++	if (priv->submode == AIROHA_XPON_PHY_SUBMODE_GPON) {
++		airoha_xpon_phy_write(priv, XPON_PHYSET1, 0x000e1309);
++		airoha_xpon_phy_rmw(priv, XPON_PHYSET3, BIT(1), BIT(1));
++		airoha_xpon_phy_write(priv, XPON_PHYFWREADY, 0x00003c01);
++	} else {
++		airoha_xpon_phy_rmw(priv, XPON_PHYFWREADY, XPON_PHYFWREADY_READY,
++				    XPON_PHYFWREADY_READY);
++	}
+ 
+ 	return 0;
+ }
+--- a/net/xpon/omci/identity.c
++++ b/net/xpon/omci/identity.c
+@@ -22,6 +22,9 @@
+ 
+ static bool omci_source_can_replace(u8 current_source, u8 source)
+ {
++	if (current_source == OMCI_CONFIG_SOURCE_DEVICE_TREE &&
++	    source == OMCI_CONFIG_SOURCE_NVMEM)
++		return false;
+ 	return source >= current_source;
+ }
+ 
+@@ -380,6 +383,8 @@
+ 		omci_identity_setter_t setter;
+ 	} properties[] = {
+ 		{ "omci-vendor-id", omci_identity_set_vendor },
++		{ "omci-serial-number", omci_identity_set_serial },
++		{ "omci-password", omci_identity_set_password },
+ 	};
+ 	unsigned int i;
+ 	int ret;
+--- a/drivers/net/optical/airoha/en7571_txrx.c
++++ b/drivers/net/optical/airoha/en7571_txrx.c
+@@ -113,7 +113,7 @@
+ 		 * Do not modify T1DELAY here.  GPON TGEN already programmed
+ 		 * the production delay and the vendor rev-2 path preserves it.
+ 		 */
+-		en7571_mpdh_stepsize(priv, !enable);
++		en7571_mpdh_stepsize(priv, enable);
+ 	} else {
+ 		en7571_hwkt(priv, enable);
+ 		en7571_t1delay_setting(priv, !enable);
+@@ -278,6 +278,20 @@
+ 		b[0] = imod & 0xff;
+ 		b[1] = (imod >> 8) & 0x0f;
+ 		lddla_wr(&priv->lddla, EN7571_P1_PWR_CTRL_CS2, b, 2);
++	} else {
++		u32 iav_imod = lddla_flash_read(&priv->lddla, EN7571_FL_IAV_IMOD);
++		if (iav_imod != EN7571_FLASH_ERASED) {
++			u32 iav = (iav_imod & EN7571_FL_IAV_MASK) >> 16;
++			u32 imod = iav_imod & EN7571_FL_IMOD_MASK;
++			u32 ibias = (iav > (imod / 2)) ? (iav - (imod / 2)) : (iav / 2);
++
++			b[0] = ibias & 0xff;
++			b[1] = (ibias >> 8) & 0x0f;
++			lddla_wr(&priv->lddla, EN7571_P0_PWR_CTRL_CS2, b, 2);
++			b[0] = imod & 0xff;
++			b[1] = (imod >> 8) & 0x0f;
++			lddla_wr(&priv->lddla, EN7571_P1_PWR_CTRL_CS2, b, 2);
++		}
+ 	}
+ 
+ 	/* TIA gain (bits 14-15) / bandwidth (bits 9-11) from flash 0x048. */
