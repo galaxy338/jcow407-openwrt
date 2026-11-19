@@ -35,6 +35,15 @@ jobs:
             gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
             python3-setuptools rsync unzip zlib1g-dev file python3 libelf-dev subversion
 
+      - name: Fix File Permissions
+        run: |
+          chmod -R +x scripts/
+          chmod -R +x tools/
+          chmod -R +x files/
+          find . -name "*.sh" -exec chmod +x {} +
+          find . -name "*.py" -exec chmod +x {} +
+          find . -name "*.pl" -exec chmod +x {} +
+
       - name: Update & Install Feeds
         run: |
           ./scripts/feeds update -a
